@@ -6,7 +6,13 @@ import (
 	"io"
 	"log"
 	"net"
+	"sync"
 )
+
+type Server struct {
+	clients map[net.Conn]struct{}
+	mu sync.RWMutex
+}
 
 func main() {
 	listener, err := net.Listen("tcp", ":8080")
@@ -15,16 +21,23 @@ func main() {
 	}
 	defer listener.Close()
 	fmt.Println("server is listening at port 8080...")
+	server := &Server{
+		clients: make(map[net.Conn]struct{}),
+	}
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			log.Fatalf("unable to accept connection: %v\n", err)
+			log.Printf("unable to accept connection: %v\n", err)
+			continue
 		}
-		go handleConn(conn)
+		server.mu.Lock()
+		server.clients[conn] = struct{}{}
+		server.mu.Unlock()
+		go handleConn(conn, server)
 	}
 }
 
-func handleConn(conn net.Conn) {
+func handleConn(conn net.Conn, s *Server) {
 	defer conn.Close()
 	log.Printf("[+] New connection: %s\n", conn.RemoteAddr().String())
 	reader := bufio.NewReader(conn)
@@ -32,6 +45,9 @@ func handleConn(conn net.Conn) {
 		input, err := reader.ReadString('\n')
 		if err != nil {
 			if err == io.EOF {
+				s.mu.Lock()
+				delete(s.clients, conn)
+				s.mu.Unlock()
 				log.Printf("[-] Disconnected: %s", conn.RemoteAddr().String())
 				break
 			} else {
@@ -39,6 +55,12 @@ func handleConn(conn net.Conn) {
 				break
 			}
 		}
-		fmt.Fprintf(conn, "echo: %s", input)
+		s.mu.RLock()
+		for nextConn := range s.clients {
+			if nextConn != conn {
+				fmt.Fprintf(nextConn, "[%s]: %s", conn.RemoteAddr().String(), input)
+			}
+		}
+		s.mu.RUnlock()
 	}
 }
