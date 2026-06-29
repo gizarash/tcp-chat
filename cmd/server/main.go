@@ -2,12 +2,15 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 )
 
 type Server struct {
@@ -20,21 +23,46 @@ func main() {
 	if err != nil {
 		log.Fatalf("unable to start listener: %v", err)
 	}
-	defer listener.Close()
+
 	fmt.Println("server is listening at port 8080...")
 	s := &Server{
 		clients: make(map[net.Conn]string),
 	}
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	go func() {
+		<-ctx.Done()
+		listener.Close()
+	}()
+
+	var wg sync.WaitGroup
+
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			log.Printf("unable to accept connection: %v\n", err)
-			continue
+			select {
+			case <-ctx.Done():
+				s.mu.Lock()
+				for nextConn := range s.clients {
+					fmt.Fprintln(nextConn, "server is shutting down")
+					nextConn.Close()
+				}
+				s.mu.Unlock()
+				wg.Wait()
+				return
+			default:
+				log.Printf("unable to accept connection: %v\n", err)
+				continue
+			}
 		}
 		s.mu.Lock()
 		s.clients[conn] = ""
 		s.mu.Unlock()
-		go handleConn(conn, s)
+		wg.Go(func() {
+			handleConn(conn, s)
+		})
+
 	}
 }
 
