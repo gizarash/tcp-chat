@@ -47,23 +47,11 @@ func handleConn(conn net.Conn, s *Server) {
 	for {
 		input, err := reader.ReadString('\n')
 		if err != nil {
-			if err == io.EOF {
-				s.mu.Lock()
-				name := s.clients[conn]
-				delete(s.clients, conn)
-				if name != "" {
-					for nextConn := range s.clients {
-						if s.clients[nextConn] != "" {
-							fmt.Fprintf(nextConn, "* %s left the chat\n", name)
-						}
-					}
-				}
-				s.mu.Unlock()
-				break
-			} else {
+			if err != io.EOF {
 				log.Printf("unable to read client input: %v", err)
-				break
 			}
+			disconnect(conn, s)
+			break
 		}
 		if userName == "" {
 			if validateName(input) {
@@ -82,13 +70,57 @@ func handleConn(conn net.Conn, s *Server) {
 				continue
 			}
 		} else {
-			s.mu.RLock()
-			for nextConn := range s.clients {
-				if nextConn != conn && s.clients[nextConn] != "" && strings.TrimSpace(input) != "" {
-					fmt.Fprintf(nextConn, "[%s]: %s", s.clients[conn], input)
+			if strings.HasPrefix(input, "/") {
+				trimmedInput := strings.TrimSpace(input)
+				if trimmedInput == "/list" {
+					s.mu.RLock()
+					for nextConn := range s.clients {
+						if nextConn != conn && s.clients[nextConn] != "" {
+							fmt.Fprintln(conn, s.clients[nextConn])
+						}
+					}
+					s.mu.RUnlock()
+				} else if trimmedInput == "/quit" {
+					disconnect(conn, s)
+					break
+				} else if strings.HasPrefix(trimmedInput, "/msg ") {
+					cmdSlice := strings.SplitN(trimmedInput, " ", 3)
+					if len(cmdSlice) >= 3 {
+						reciever := cmdSlice[1]
+						message := cmdSlice[2]
+						if strings.TrimSpace(message) == "" {
+							fmt.Fprintln(conn, "message cannot be empty")
+						} else {
+							s.mu.RLock()
+							found := false
+							for nextConn := range s.clients {
+								if nextConn != conn && s.clients[nextConn] == reciever {
+									fmt.Fprintf(nextConn, "[private] %s: %s\n", s.clients[conn], message)
+									fmt.Fprintf(conn, "[private -> %s]: %s\n", s.clients[nextConn], message)
+									found = true
+									break
+								}
+							}
+							if !found {
+								fmt.Fprintf(conn, "user \"%s\" not found\n", reciever)
+							}
+							s.mu.RUnlock()
+						}
+					} else {
+						fmt.Fprintln(conn, "correct msg command is \"/msg username message\"")
+					}
+				} else {
+					fmt.Fprintf(conn, "unknown command: %s\n", trimmedInput)
 				}
+			} else {
+				s.mu.RLock()
+				for nextConn := range s.clients {
+					if nextConn != conn && s.clients[nextConn] != "" && strings.TrimSpace(input) != "" {
+						fmt.Fprintf(nextConn, "[%s]: %s", s.clients[conn], input)
+					}
+				}
+				s.mu.RUnlock()
 			}
-			s.mu.RUnlock()
 		}
 	}
 }
@@ -96,4 +128,18 @@ func handleConn(conn net.Conn, s *Server) {
 func validateName(name string) bool {
 	trimmedName := strings.TrimSpace(name)
 	return trimmedName != "" && len(trimmedName) <= 20 && !strings.Contains(trimmedName, " ")
+}
+
+func disconnect(conn net.Conn, s *Server) {
+	s.mu.Lock()
+	name := s.clients[conn]
+	delete(s.clients, conn)
+	if name != "" {
+		for nextConn := range s.clients {
+			if s.clients[nextConn] != "" {
+				fmt.Fprintf(nextConn, "* %s left the chat\n", name)
+			}
+		}
+	}
+	s.mu.Unlock()
 }
