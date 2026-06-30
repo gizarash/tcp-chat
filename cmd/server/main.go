@@ -15,7 +15,13 @@ import (
 
 type Server struct {
 	clients map[net.Conn]string
+	history []Message
 	mu      sync.RWMutex
+}
+
+type Message struct {
+	sender  string
+	message string
 }
 
 func main() {
@@ -92,6 +98,14 @@ func handleConn(conn net.Conn, s *Server) {
 					}
 				}
 				s.mu.Unlock()
+				s.mu.RLock()
+				if len(s.history) > 0 {
+					fmt.Fprintf(conn, "--- last %d messages ---\n", len(s.history))
+					for _, msg := range s.history {
+						fmt.Fprintf(conn, "[%s]: %s\n", msg.sender, msg.message)
+					}
+				}
+				s.mu.RUnlock()
 			} else {
 				fmt.Fprintln(conn, "Name cannot be empty, longer than 20 characters, or contain any space characters.")
 				fmt.Fprint(conn, "Enter your name: ")
@@ -141,13 +155,21 @@ func handleConn(conn net.Conn, s *Server) {
 					fmt.Fprintf(conn, "unknown command: %s\n", trimmedInput)
 				}
 			} else {
-				s.mu.RLock()
-				for nextConn := range s.clients {
-					if nextConn != conn && s.clients[nextConn] != "" && strings.TrimSpace(input) != "" {
-						fmt.Fprintf(nextConn, "[%s]: %s", s.clients[conn], input)
+				trimmedInput := strings.TrimSpace(input)
+				if trimmedInput != "" {
+					s.mu.RLock()
+					sender := s.clients[conn]
+					s.mu.RUnlock()
+					saveNewMessage(s, sender, trimmedInput)
+
+					s.mu.RLock()
+					for nextConn := range s.clients {
+						if nextConn != conn && s.clients[nextConn] != "" {
+							fmt.Fprintf(nextConn, "[%s]: %s\n", sender, trimmedInput)
+						}
 					}
+					s.mu.RUnlock()
 				}
-				s.mu.RUnlock()
 			}
 		}
 	}
@@ -169,5 +191,14 @@ func disconnect(conn net.Conn, s *Server) {
 			}
 		}
 	}
+	s.mu.Unlock()
+}
+
+func saveNewMessage(s *Server, sender string, msg string) {
+	s.mu.Lock()
+	if len(s.history) >= 20 {
+		s.history = s.history[1:]
+	}
+	s.history = append(s.history, Message{sender: sender, message: msg})
 	s.mu.Unlock()
 }
